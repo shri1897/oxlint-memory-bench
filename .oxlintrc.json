@@ -1,0 +1,21 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": [
+    "typescript",
+    "react",
+    "import"
+  ],
+  "jsPlugins": [
+    {
+      "name": "custom",
+      "specifier": "./plugins/no-unused-imports.mjs"
+    }
+  ],
+  "categories": {
+    "correctness": "off"
+  },
+  "rules": {
+    "custom/no-unused-imports": "warn",
+    "no-unused-vars": "warn"
+  }
+}
