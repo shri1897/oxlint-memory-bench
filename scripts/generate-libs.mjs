@@ -1,34 +1,44 @@
 #!/usr/bin/env node
 
 /**
- * Generates N libraries with realistic TypeScript files to simulate a large monorepo.
+ * Generates N libraries with realistic TypeScript/React files.
  *
  * Usage:
  *   node scripts/generate-libs.mjs [count] [files-per-lib]
  *
  * Defaults: 100 libs, 10 files per lib
+ *
+ * Examples:
+ *   node scripts/generate-libs.mjs 50        # 50 libs × 10 files = 500 files
+ *   node scripts/generate-libs.mjs 500 20    # 500 libs × 20 files = 10,000 files
  */
 
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 
 const LIB_COUNT = parseInt(process.argv[2] || '100', 10);
 const FILES_PER_LIB = parseInt(process.argv[3] || '10', 10);
-const LIBS_DIR = join(import.meta.dirname, '..', 'libs');
+const ROOT = join(import.meta.dirname, '..');
+const LIBS_DIR = join(ROOT, 'libs');
 
-// Realistic TypeScript component templates
+// Clean existing libs
+if (existsSync(LIBS_DIR)) {
+  rmSync(LIBS_DIR, { recursive: true });
+}
+
+// Realistic TypeScript/React component templates with unused imports
 const templates = [
-  (libName, i) => `
-import { useState, useEffect, useCallback } from 'react';
-import { unusedHelper } from '../utils';
+  // React component with hooks + unused import
+  (lib, i) => `import { useState, useEffect, useCallback } from 'react';
+import { unusedHelper } from './utils';
 
-interface ${pascal(libName)}Props {
+interface ${p(lib)}Props${i} {
   id: string;
   label: string;
   onAction?: (id: string) => void;
 }
 
-export const ${pascal(libName)}Component${i} = ({ id, label, onAction }: ${pascal(libName)}Props) => {
+export const ${p(lib)}Component${i} = ({ id, label, onAction }: ${p(lib)}Props${i}) => {
   const [state, setState] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -54,10 +64,9 @@ export const ${pascal(libName)}Component${i} = ({ id, label, onAction }: ${pasca
   );
 };
 `,
-  (libName, i) => `
-import { useMemo, useRef } from 'react';
+  // Table component with useMemo + unused import
+  (lib, i) => `import { useMemo, useRef } from 'react';
 import type { ReactNode } from 'react';
-import { formatDate } from 'date-fns';
 
 interface TableRow {
   id: string;
@@ -66,13 +75,13 @@ interface TableRow {
   createdAt: Date;
 }
 
-interface ${pascal(libName)}TableProps${i} {
+interface ${p(lib)}TableProps${i} {
   rows: TableRow[];
   sortBy?: keyof TableRow;
   onRowClick?: (row: TableRow) => void;
 }
 
-export const ${pascal(libName)}Table${i} = ({ rows, sortBy = 'name', onRowClick }: ${pascal(libName)}TableProps${i}) => {
+export const ${p(lib)}Table${i} = ({ rows, sortBy = 'name', onRowClick }: ${p(lib)}TableProps${i}) => {
   const containerRef = useRef<HTMLDivElement>(null);
 
   const sortedRows = useMemo(
@@ -92,25 +101,25 @@ export const ${pascal(libName)}Table${i} = ({ rows, sortBy = 'name', onRowClick 
   );
 };
 `,
-  (libName, i) => `
-import { createContext, useContext, useReducer } from 'react';
+  // Context/Provider with useReducer
+  (lib, i) => `import { createContext, useContext, useReducer } from 'react';
 import type { Dispatch } from 'react';
 
-interface ${pascal(libName)}State${i} {
+interface ${p(lib)}State${i} {
   items: string[];
   selected: string | null;
   filter: string;
 }
 
-type ${pascal(libName)}Action${i} =
+type ${p(lib)}Action${i} =
   | { type: 'ADD_ITEM'; payload: string }
   | { type: 'SELECT'; payload: string }
   | { type: 'SET_FILTER'; payload: string }
   | { type: 'RESET' };
 
-const initialState: ${pascal(libName)}State${i} = { items: [], selected: null, filter: '' };
+const initial: ${p(lib)}State${i} = { items: [], selected: null, filter: '' };
 
-function reducer(state: ${pascal(libName)}State${i}, action: ${pascal(libName)}Action${i}): ${pascal(libName)}State${i} {
+function reducer(state: ${p(lib)}State${i}, action: ${p(lib)}Action${i}): ${p(lib)}State${i} {
   switch (action.type) {
     case 'ADD_ITEM':
       return { ...state, items: [...state.items, action.payload] };
@@ -119,79 +128,63 @@ function reducer(state: ${pascal(libName)}State${i}, action: ${pascal(libName)}A
     case 'SET_FILTER':
       return { ...state, filter: action.payload };
     case 'RESET':
-      return initialState;
+      return initial;
     default:
       return state;
   }
 }
 
-const ${pascal(libName)}Context${i} = createContext<{
-  state: ${pascal(libName)}State${i};
-  dispatch: Dispatch<${pascal(libName)}Action${i}>;
-} | null>(null);
+const Ctx${i} = createContext<{ state: ${p(lib)}State${i}; dispatch: Dispatch<${p(lib)}Action${i}> } | null>(null);
 
-export const use${pascal(libName)}${i} = () => {
-  const ctx = useContext(${pascal(libName)}Context${i});
+export const use${p(lib)}${i} = () => {
+  const ctx = useContext(Ctx${i});
   if (!ctx) throw new Error('Missing provider');
   return ctx;
 };
-
-export const ${pascal(libName)}Provider${i} = ({ children }: { children: React.ReactNode }) => {
-  const [state, dispatch] = useReducer(reducer, initialState);
-  return (
-    <${pascal(libName)}Context${i}.Provider value={{ state, dispatch }}>
-      {children}
-    </${pascal(libName)}Context${i}.Provider>
-  );
-};
 `,
-  (libName, i) => `
-export interface ${pascal(libName)}Config${i} {
+  // API client utility (pure TS, no React)
+  (lib, i) => `export interface ${p(lib)}Config${i} {
   endpoint: string;
   timeout: number;
   retries: number;
   headers: Record<string, string>;
 }
 
-export interface ${pascal(libName)}Response${i}<T> {
+export interface ${p(lib)}Response${i}<T> {
   data: T;
   status: number;
   timestamp: number;
 }
 
-export async function fetch${pascal(libName)}${i}<T>(
-  config: ${pascal(libName)}Config${i},
+export async function fetch${p(lib)}${i}<T>(
+  config: ${p(lib)}Config${i},
   path: string,
   params?: Record<string, string>
-): Promise<${pascal(libName)}Response${i}<T>> {
+): Promise<${p(lib)}Response${i}<T>> {
   const url = new URL(path, config.endpoint);
   if (params) {
     Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
   }
 
   let lastError: Error | null = null;
-
   for (let attempt = 0; attempt < config.retries; attempt++) {
     try {
       const res = await fetch(url.toString(), {
         headers: config.headers,
         signal: AbortSignal.timeout(config.timeout),
       });
-
       if (!res.ok) throw new Error(\`HTTP \${res.status}\`);
-
-      const data = await res.json() as T;
+      const data = (await res.json()) as T;
       return { data, status: res.status, timestamp: Date.now() };
     } catch (err) {
       lastError = err as Error;
     }
   }
-
   throw lastError;
 }
 `,
-  (libName, i) => `
-import { useEffect, useState } from 'react';
+  // Hook with event tracking
+  (lib, i) => `import { useEffect, useState } from 'react';
 
 type EventType = 'click' | 'hover' | 'scroll' | 'resize' | 'keydown';
 
@@ -203,38 +196,30 @@ interface AnalyticsEvent {
 }
 
 const queue: AnalyticsEvent[] = [];
-let flushTimer: ReturnType<typeof setTimeout> | null = null;
+let timer: ReturnType<typeof setTimeout> | null = null;
 
 function enqueue(event: AnalyticsEvent) {
   queue.push(event);
-  if (!flushTimer) {
-    flushTimer = setTimeout(flush, 5000);
-  }
+  if (!timer) timer = setTimeout(flush, 5000);
 }
 
 async function flush() {
-  flushTimer = null;
+  timer = null;
   if (queue.length === 0) return;
   const batch = queue.splice(0, queue.length);
   await fetch('/api/analytics', {
     method: 'POST',
     body: JSON.stringify(batch),
     headers: { 'Content-Type': 'application/json' },
-  }).catch(() => {
-    queue.unshift(...batch);
-  });
+  }).catch(() => queue.unshift(...batch));
 }
 
-export function useTrack${pascal(libName)}${i}(target: string) {
+export function useTrack${p(lib)}${i}(target: string) {
   const [count, setCount] = useState(0);
-
-  useEffect(() => {
-    return () => { flush(); };
-  }, []);
-
+  useEffect(() => () => { flush(); }, []);
   return {
-    track: (type: EventType, metadata?: Record<string, unknown>) => {
-      enqueue({ type, target, timestamp: Date.now(), metadata });
+    track: (type: EventType, meta?: Record<string, unknown>) => {
+      enqueue({ type, target, timestamp: Date.now(), metadata: meta });
       setCount(c => c + 1);
     },
     eventCount: count,
@@ -243,33 +228,27 @@ export function useTrack${pascal(libName)}${i}(target: string) {
 `,
 ];
 
-function pascal(str) {
-  return str
-    .split('-')
-    .map(s => s.charAt(0).toUpperCase() + s.slice(1))
-    .join('');
+function p(str) {
+  return str.split('-').map(s => s[0].toUpperCase() + s.slice(1)).join('');
 }
 
-console.log(`Generating ${LIB_COUNT} libs with ${FILES_PER_LIB} files each...`);
-console.log(`Total files: ${LIB_COUNT * FILES_PER_LIB}`);
+console.log(`Generating ${LIB_COUNT} libs x ${FILES_PER_LIB} files = ${LIB_COUNT * FILES_PER_LIB} total files...`);
 
 for (let lib = 0; lib < LIB_COUNT; lib++) {
   const libName = `lib-${String(lib).padStart(4, '0')}`;
-  const libDir = join(LIBS_DIR, libName, 'src');
-  mkdirSync(libDir, { recursive: true });
+  const srcDir = join(LIBS_DIR, libName, 'src');
+  mkdirSync(srcDir, { recursive: true });
 
-  // index.ts barrel file
   const exports = [];
-
   for (let file = 0; file < FILES_PER_LIB; file++) {
     const template = templates[file % templates.length];
     const fileName = `component-${file}.tsx`;
-    writeFileSync(join(libDir, fileName), template(libName, file).trimStart());
+    writeFileSync(join(srcDir, fileName), template(libName, file));
     exports.push(`export * from './component-${file}';`);
   }
 
-  writeFileSync(join(libDir, 'index.ts'), exports.join('\n') + '\n');
-  writeFileSync(join(libDir, 'utils.ts'), `export const unusedHelper = () => {};\n`);
+  writeFileSync(join(srcDir, 'index.ts'), exports.join('\n') + '\n');
+  writeFileSync(join(srcDir, 'utils.ts'), 'export const unusedHelper = () => {};\n');
 }
 
-console.log(`Done! Generated ${LIB_COUNT} libs in ./libs/`);
+console.log(`Done! Generated in ./libs/`);

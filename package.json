@@ -2,11 +2,14 @@
   "name": "oxlint-memory-bench",
   "version": "1.0.0",
   "private": true,
-  "description": "Benchmark repo to reproduce oxlint jsPlugins memory scaling issue",
+  "description": "Benchmark repo to reproduce oxlint jsPlugins memory scaling issue in large monorepos",
+  "type": "module",
   "scripts": {
     "generate": "node scripts/generate-libs.mjs",
-    "bench": "node scripts/bench-memory.mjs",
-    "clean": "rm -rf libs"
+    "bench": "node scripts/bench.mjs",
+    "bench:lsp": "node scripts/bench-lsp.mjs",
+    "bench:compare": "node scripts/compare-versions.mjs",
+    "clean": "rm -rf libs results"
   },
   "devDependencies": {
     "oxlint": "latest"
