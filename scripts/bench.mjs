@@ -1,221 +1,338 @@
 #!/usr/bin/env node
 
 /**
- * Benchmarks oxlint CLI memory usage with and without jsPlugins
- * across different workspace sizes.
+ * oxlint jsPlugins Memory & Time Scaling Benchmark
+ *
+ * Generates synthetic TypeScript/React files, starts `oxlint --lsp`,
+ * sends didOpen for all files, and measures RSS + time at each scale.
  *
  * Usage:
  *   node scripts/bench.mjs [options]
  *
  * Options:
- *   --libs 50,100,200,500,1000    Lib counts to test (default: 50,100,200,500,1000)
- *   --files-per-lib 10            Files per lib (default: 10)
- *   --version 1.55.0              oxlint version to test (default: installed)
- *   --output results/bench.json   Save JSON results (default: results/<version>-cli.json)
- *   --runs 3                      Number of runs per config (default: 3, takes median)
+ *   --oxlint-bin /path/to/bin   Custom oxlint binary or cli.js (default: npx oxlint)
+ *   --files-per-lib 10          Files per lib (default: 10)
+ *   --settle-ms 5000            Wait after last file for processing (default: 5000)
+ *   --batch-size 500            Files per didOpen batch (default: 500)
+ *   --output path               Save JSON results (default: results/<label>.json)
  *
  * Examples:
  *   node scripts/bench.mjs
- *   node scripts/bench.mjs --version 1.55.0 --libs 100,500,1000
- *   node scripts/bench.mjs --version 1.43.0 --runs 1
+ *   node scripts/bench.mjs --oxlint-bin /path/to/patched/cli.js
  */
 
-import { execSync } from 'node:child_process';
-import { writeFileSync, readFileSync, mkdirSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { spawn, execSync } from 'node:child_process';
+import { writeFileSync, readFileSync, mkdirSync, rmSync, existsSync, readdirSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 
 const ROOT = join(import.meta.dirname, '..');
+const LIBS_DIR = join(ROOT, 'libs');
 const RESULTS_DIR = join(ROOT, 'results');
 
-// --- Parse args ---
+// --- Args ---
 const args = process.argv.slice(2);
 function getArg(name, fallback) {
   const idx = args.indexOf(`--${name}`);
   return idx !== -1 && args[idx + 1] ? args[idx + 1] : fallback;
 }
 
-const LIB_COUNTS = getArg('libs', '50,100,200,500,1000').split(',').map(Number);
+const CUSTOM_BIN = getArg('oxlint-bin', null);
 const FILES_PER_LIB = parseInt(getArg('files-per-lib', '10'), 10);
-const RUNS = parseInt(getArg('runs', '3'), 10);
-const VERSION = getArg('version', null);
+const SETTLE_MS = parseInt(getArg('settle-ms', '5000'), 10);
+const BATCH_SIZE = parseInt(getArg('batch-size', '500'), 10);
 
-// --- Resolve oxlint binary ---
-function resolveOxlint() {
-  if (VERSION) {
-    // Install specific version to a temp location
-    console.log(`Installing oxlint@${VERSION}...`);
-    execSync(`npm install --no-save oxlint@${VERSION}`, { cwd: ROOT, stdio: 'pipe' });
+const FILE_COUNTS = [10, 100, 500, 1_000, 5_000, 10_000, 20_000, 30_000, 50_000, 75_000, 100_000, 200_000];
+
+// --- oxlint resolution ---
+function spawnLsp() {
+  if (CUSTOM_BIN) {
+    if (CUSTOM_BIN.endsWith('.js') || CUSTOM_BIN.endsWith('.mjs'))
+      return spawn('node', [resolve(CUSTOM_BIN), '--lsp'], { cwd: ROOT, stdio: ['pipe', 'pipe', 'pipe'] });
+    return spawn(resolve(CUSTOM_BIN), ['--lsp'], { cwd: ROOT, stdio: ['pipe', 'pipe', 'pipe'] });
   }
-  const raw = execSync('npx oxlint --version', { cwd: ROOT, encoding: 'utf8' }).trim();
-  // Strip "Version: " or "oxlint " prefix if present
-  return raw.replace(/^(Version:\s*|oxlint\s*)/i, '');
+  return spawn('npx', ['oxlint', '--lsp'], { cwd: ROOT, stdio: ['pipe', 'pipe', 'pipe'] });
 }
 
-const oxlintVersion = resolveOxlint();
-console.log(`oxlint version: ${oxlintVersion}\n`);
-
-const OUTPUT = getArg('output', join(RESULTS_DIR, `${oxlintVersion}-cli.json`));
-
-// --- Configs to test ---
-const configs = {
-  'native-only': {
-    $schema: './node_modules/oxlint/configuration_schema.json',
-    plugins: ['typescript', 'react', 'import'],
-    categories: { correctness: 'off' },
-    rules: { 'no-unused-vars': 'warn' },
-  },
-  'with-jsplugin': {
-    $schema: './node_modules/oxlint/configuration_schema.json',
-    plugins: ['typescript', 'react', 'import'],
-    jsPlugins: [{ name: 'custom', specifier: './plugins/no-unused-imports.mjs' }],
-    categories: { correctness: 'off' },
-    rules: { 'custom/no-unused-imports': 'warn', 'no-unused-vars': 'warn' },
-  },
-};
-
-// --- Measure memory ---
-function measurePeakRss(config) {
-  const configPath = join(ROOT, '.oxlintrc.bench.json');
-  writeFileSync(configPath, JSON.stringify(config, null, 2));
-
-  const cmd = `npx oxlint --config .oxlintrc.bench.json ./libs/`;
-  const platform = process.platform;
-
+function getVersion() {
   try {
-    let result;
-    if (platform === 'darwin') {
-      result = execSync(`/usr/bin/time -l ${cmd} 2>&1 || true`, {
-        cwd: ROOT, encoding: 'utf8', maxBuffer: 100 * 1024 * 1024, timeout: 600_000,
-      });
-      const m = result.match(/(\d+)\s+maximum resident set size/);
-      return m ? parseInt(m[1], 10) / 1024 / 1024 : 0; // bytes -> MB
-    } else {
-      // Linux: /usr/bin/time -v gives RSS in KB
-      result = execSync(`/usr/bin/time -v ${cmd} 2>&1 || true`, {
-        cwd: ROOT, encoding: 'utf8', maxBuffer: 100 * 1024 * 1024, timeout: 600_000,
-      });
-      const m = result.match(/Maximum resident set size.*?:\s*(\d+)/);
-      return m ? parseInt(m[1], 10) / 1024 : 0; // KB -> MB
+    if (CUSTOM_BIN) {
+      if (CUSTOM_BIN.endsWith('.js') || CUSTOM_BIN.endsWith('.mjs'))
+        return execSync(`node ${resolve(CUSTOM_BIN)} --version`, { cwd: ROOT, encoding: 'utf8' }).trim();
+      return execSync(`${resolve(CUSTOM_BIN)} --version`, { encoding: 'utf8' }).trim();
     }
-  } catch {
-    return -1;
+    return execSync('npx oxlint --version', { cwd: ROOT, encoding: 'utf8' }).trim();
+  } catch { return 'unknown'; }
+}
+
+const version = getVersion().replace(/^(Version:\s*|oxlint\s*)/i, '');
+const binLabel = CUSTOM_BIN ? resolve(CUSTOM_BIN).split('/').slice(-2).join('/') : 'npx-oxlint';
+const OUTPUT = getArg('output', join(RESULTS_DIR, `${binLabel.replace(/[/:]/g, '_')}.json`));
+
+// --- LSP helpers ---
+let msgId = 0;
+function encode(obj) {
+  const body = JSON.stringify(obj);
+  return `Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`;
+}
+
+// --- Memory ---
+function getRssMb(pid) {
+  try { return parseInt(execSync(`ps -o rss= -p ${pid}`, { encoding: 'utf8' }).trim(), 10) / 1024; }
+  catch { return 0; }
+}
+
+function getTreeRss(pid) {
+  let total = getRssMb(pid);
+  try {
+    const children = execSync(`pgrep -P ${pid}`, { encoding: 'utf8' }).trim().split('\n').map(Number).filter(Boolean);
+    for (const cpid of children) {
+      total += getRssMb(cpid);
+      try {
+        const gc = execSync(`pgrep -P ${cpid}`, { encoding: 'utf8' }).trim().split('\n').map(Number).filter(Boolean);
+        for (const gcpid of gc) total += getRssMb(gcpid);
+      } catch {}
+    }
+  } catch {}
+  return total;
+}
+
+// --- File generation ---
+function pascal(str) { return str.split('-').map(s => s[0].toUpperCase() + s.slice(1)).join(''); }
+
+const templates = [
+  (lib, i) => `import { useState, useEffect, useCallback } from 'react';
+import { unusedHelper } from './utils';
+interface ${pascal(lib)}Props${i} { id: string; label: string; onAction?: (id: string) => void; }
+export const ${pascal(lib)}C${i} = ({ id, label, onAction }: ${pascal(lib)}Props${i}) => {
+  const [s, setS] = useState<string | null>(null);
+  const [l, setL] = useState(false);
+  useEffect(() => { setL(true); fetch(\`/api/\${id}\`).then(r => r.json()).then(d => setS(d.v)).finally(() => setL(false)); }, [id]);
+  const h = useCallback(() => { onAction?.(id); }, [id, onAction]);
+  if (l) return <div>Loading...</div>;
+  return <div onClick={h}><span>{label}</span><span>{s}</span></div>;
+};
+`,
+  (lib, i) => `import { useMemo, useRef } from 'react';
+import type { ReactNode } from 'react';
+interface Row { id: string; name: string; value: number; }
+interface ${pascal(lib)}TP${i} { rows: Row[]; sortBy?: keyof Row; onClick?: (r: Row) => void; }
+export const ${pascal(lib)}T${i} = ({ rows, sortBy = 'name', onClick }: ${pascal(lib)}TP${i}) => {
+  const ref = useRef<HTMLDivElement>(null);
+  const sorted = useMemo(() => [...rows].sort((a, b) => String(a[sortBy]).localeCompare(String(b[sortBy]))), [rows, sortBy]);
+  return <div ref={ref}>{sorted.map(r => <div key={r.id} onClick={() => onClick?.(r)}><span>{r.name}</span><span>{r.value}</span></div>)}</div>;
+};
+`,
+  (lib, i) => `import { createContext, useContext, useReducer } from 'react';
+import type { Dispatch } from 'react';
+interface S${i} { items: string[]; selected: string | null; filter: string; }
+type A${i} = { type: 'ADD'; payload: string } | { type: 'SEL'; payload: string } | { type: 'FILT'; payload: string } | { type: 'RESET' };
+const init: S${i} = { items: [], selected: null, filter: '' };
+function reducer(s: S${i}, a: A${i}): S${i} {
+  switch(a.type) { case 'ADD': return {...s, items: [...s.items, a.payload]}; case 'SEL': return {...s, selected: a.payload}; case 'FILT': return {...s, filter: a.payload}; case 'RESET': return init; default: return s; }
+}
+const Ctx${i} = createContext<{s: S${i}; d: Dispatch<A${i}>} | null>(null);
+export const use${pascal(lib)}${i} = () => { const c = useContext(Ctx${i}); if(!c) throw new Error('Missing'); return c; };
+`,
+  (lib, i) => `export interface ${pascal(lib)}Cfg${i} { endpoint: string; timeout: number; retries: number; headers: Record<string, string>; }
+export interface ${pascal(lib)}Res${i}<T> { data: T; status: number; ts: number; }
+export async function fetch${pascal(lib)}${i}<T>(cfg: ${pascal(lib)}Cfg${i}, path: string, params?: Record<string, string>): Promise<${pascal(lib)}Res${i}<T>> {
+  const url = new URL(path, cfg.endpoint);
+  if (params) Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
+  let err: Error | null = null;
+  for (let i = 0; i < cfg.retries; i++) {
+    try { const r = await fetch(url.toString(), { headers: cfg.headers, signal: AbortSignal.timeout(cfg.timeout) }); if (!r.ok) throw new Error(\`HTTP \${r.status}\`); return { data: await r.json() as T, status: r.status, ts: Date.now() }; }
+    catch (e) { err = e as Error; }
   }
+  throw err;
+}
+`,
+  (lib, i) => `import { useEffect, useState } from 'react';
+type ET = 'click' | 'hover' | 'scroll' | 'resize';
+interface AE { type: ET; target: string; ts: number; meta?: Record<string, unknown>; }
+const q: AE[] = []; let t: ReturnType<typeof setTimeout> | null = null;
+function enq(e: AE) { q.push(e); if (!t) t = setTimeout(flush, 5000); }
+async function flush() { t = null; if (!q.length) return; const b = q.splice(0); await fetch('/api/a', { method: 'POST', body: JSON.stringify(b), headers: { 'Content-Type': 'application/json' } }).catch(() => q.unshift(...b)); }
+export function useTrack${pascal(lib)}${i}(target: string) {
+  const [c, setC] = useState(0);
+  useEffect(() => () => { flush(); }, []);
+  return { track: (type: ET, meta?: Record<string, unknown>) => { enq({ type, target, ts: Date.now(), meta }); setC(v => v + 1); }, count: c };
+}
+`,
+];
+
+function generateFiles(targetCount) {
+  if (existsSync(LIBS_DIR)) rmSync(LIBS_DIR, { recursive: true });
+
+  const libCount = Math.ceil(targetCount / FILES_PER_LIB);
+  let generated = 0;
+
+  for (let lib = 0; lib < libCount && generated < targetCount; lib++) {
+    const libName = `lib-${String(lib).padStart(5, '0')}`;
+    const srcDir = join(LIBS_DIR, libName, 'src');
+    mkdirSync(srcDir, { recursive: true });
+
+    const filesThisLib = Math.min(FILES_PER_LIB, targetCount - generated);
+    for (let f = 0; f < filesThisLib; f++) {
+      writeFileSync(join(srcDir, `c${f}.tsx`), templates[f % templates.length](libName, f));
+      generated++;
+    }
+    // Don't write extra files — keep file count exact
+  }
+  return generated;
 }
 
-function median(arr) {
-  const sorted = [...arr].sort((a, b) => a - b);
-  const mid = Math.floor(sorted.length / 2);
-  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+function collectFiles() {
+  const files = [];
+  function walk(d) {
+    for (const entry of readdirSync(d, { withFileTypes: true })) {
+      const full = join(d, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (entry.name.endsWith('.tsx') || entry.name.endsWith('.ts')) files.push(full);
+    }
+  }
+  walk(LIBS_DIR);
+  return files;
 }
 
-// --- Run benchmark ---
+// --- Run one benchmark at a given file count ---
+async function benchAtScale(targetFiles) {
+  const generated = generateFiles(targetFiles);
+  const files = collectFiles();
+
+  return new Promise((done) => {
+    const child = spawnLsp();
+    child.stdin.on('error', () => {});
+    child.stderr.on('data', () => {});
+
+    const t0 = Date.now();
+
+    // Initialize
+    child.stdin.write(encode({
+      jsonrpc: '2.0', id: ++msgId, method: 'initialize',
+      params: {
+        processId: process.pid,
+        rootUri: `file://${resolve(ROOT)}`,
+        workspaceFolders: [{ uri: `file://${resolve(ROOT)}`, name: 'bench' }],
+        capabilities: { workspace: { workspaceFolders: true }, textDocument: { publishDiagnostics: { relatedInformation: true } } },
+      },
+    }));
+
+    setTimeout(() => {
+      child.stdin.write(encode({ jsonrpc: '2.0', method: 'initialized', params: {} }));
+
+      let idx = 0;
+      function openBatch() {
+        const end = Math.min(idx + BATCH_SIZE, files.length);
+        for (; idx < end; idx++) {
+          try {
+            const f = files[idx];
+            child.stdin.write(encode({
+              jsonrpc: '2.0', method: 'textDocument/didOpen',
+              params: { textDocument: { uri: `file://${f}`, languageId: f.endsWith('.tsx') ? 'typescriptreact' : 'typescript', version: 1, text: readFileSync(f, 'utf8') } },
+            }));
+          } catch {}
+        }
+
+        if (idx < files.length) {
+          setTimeout(openBatch, 50);
+        } else {
+          // Settle, then measure
+          setTimeout(() => {
+            const totalMs = Date.now() - t0;
+            const rssMb = getTreeRss(child.pid);
+
+            child.stdin.write(encode({ jsonrpc: '2.0', id: ++msgId, method: 'shutdown', params: null }));
+            setTimeout(() => {
+              child.kill();
+              done({ files: files.length, rssMb: Math.round(rssMb), timeMs: totalMs });
+            }, 500);
+          }, SETTLE_MS);
+        }
+      }
+
+      openBatch();
+    }, 500);
+
+    // Safety
+    setTimeout(() => { child.kill(); done({ files: files.length, rssMb: -1, timeMs: -1 }); }, 600_000);
+  });
+}
+
+// --- Main ---
 mkdirSync(RESULTS_DIR, { recursive: true });
+
+console.log('='.repeat(80));
+console.log('  oxlint LSP Memory & Time Scaling Benchmark');
+console.log('='.repeat(80));
+console.log(`  Binary:    ${CUSTOM_BIN ? resolve(CUSTOM_BIN) : 'npx oxlint'}`);
+console.log(`  Version:   ${version}`);
+console.log(`  Scales:    ${FILE_COUNTS.map(n => n.toLocaleString('en-US')).join(', ')} files`);
+console.log(`  Settle:    ${SETTLE_MS}ms per scale`);
+console.log('='.repeat(80));
+console.log();
 
 const results = [];
 
-console.log('='.repeat(75));
-console.log(`  oxlint jsPlugins Memory Benchmark (CLI mode)`);
-console.log(`  Version: ${oxlintVersion} | Runs per config: ${RUNS} | Files/lib: ${FILES_PER_LIB}`);
-console.log('='.repeat(75));
-
-for (const libCount of LIB_COUNTS) {
-  const totalFiles = libCount * FILES_PER_LIB;
-  console.log(`\n  Generating ${libCount} libs (${totalFiles.toLocaleString()} files)...`);
-
-  execSync(`node scripts/generate-libs.mjs ${libCount} ${FILES_PER_LIB}`, {
-    cwd: ROOT, stdio: 'pipe',
-  });
-
-  for (const [configName, config] of Object.entries(configs)) {
-    const measurements = [];
-    for (let run = 0; run < RUNS; run++) {
-      process.stdout.write(`    ${configName} run ${run + 1}/${RUNS}...`);
-      const mb = measurePeakRss(config);
-      measurements.push(mb);
-      process.stdout.write(` ${mb.toFixed(1)} MB\n`);
-    }
-
-    const peakMb = median(measurements);
-    results.push({
-      libs: libCount,
-      files: totalFiles,
-      config: configName,
-      peakRssMb: Math.round(peakMb * 10) / 10,
-      allRuns: measurements.map(m => Math.round(m * 10) / 10),
-    });
-  }
+for (const target of FILE_COUNTS) {
+  process.stdout.write(`  ${String(target.toLocaleString('en-US')).padStart(9)} files ... `);
+  const r = await benchAtScale(target);
+  const timeSec = (r.timeMs / 1000).toFixed(1);
+  console.log(`${String(r.rssMb).padStart(6)} MB  ${timeSec.padStart(7)}s`);
+  results.push(r);
 }
 
-// --- Print results table ---
-console.log('\n' + '='.repeat(75));
-console.log('  Results (median peak RSS)');
-console.log('='.repeat(75));
-console.log(
-  '  ' +
-  'Libs'.padEnd(8) +
-  'Files'.padEnd(10) +
-  'native-only'.padEnd(16) +
-  'with-jsplugin'.padEnd(16) +
-  'Overhead'
-);
-console.log('  ' + '-'.repeat(65));
+// --- Table ---
+console.log('\n' + '='.repeat(80));
+console.log('  Results');
+console.log('='.repeat(80));
+console.log('  ' + 'Files'.padStart(10) + 'RSS (MB)'.padStart(12) + 'Time (s)'.padStart(12) + '  MB/1K files'.padStart(14));
+console.log('  ' + '-'.repeat(48));
 
-// Group by lib count
-const grouped = {};
 for (const r of results) {
-  if (!grouped[r.libs]) grouped[r.libs] = {};
-  grouped[r.libs][r.config] = r.peakRssMb;
-}
-
-for (const [libs, data] of Object.entries(grouped)) {
-  const native = data['native-only'] || 0;
-  const withPlugin = data['with-jsplugin'] || 0;
-  const overhead = withPlugin - native;
-  const ratio = native > 0 ? (withPlugin / native).toFixed(1) : '?';
-  const files = parseInt(libs) * FILES_PER_LIB;
-
+  const mbPer1k = r.files > 0 ? ((r.rssMb / r.files) * 1000).toFixed(1) : '?';
   console.log(
     '  ' +
-    String(libs).padEnd(8) +
-    String(files.toLocaleString()).padEnd(10) +
-    `${native.toFixed(1)} MB`.padEnd(16) +
-    `${withPlugin.toFixed(1)} MB`.padEnd(16) +
-    `+${overhead.toFixed(1)} MB (${ratio}x)`
+    String(r.files.toLocaleString('en-US')).padStart(10) +
+    String(r.rssMb).padStart(12) +
+    (r.timeMs / 1000).toFixed(1).padStart(12) +
+    String(mbPer1k).padStart(14)
   );
 }
 
-// --- ASCII bar chart ---
-console.log('\n' + '='.repeat(75));
-console.log('  Memory Scaling Chart');
-console.log('='.repeat(75));
+// --- Chart ---
+console.log('\n' + '='.repeat(80));
+console.log('  Memory Scaling');
+console.log('='.repeat(80));
 
-const maxMb = Math.max(...results.map(r => r.peakRssMb));
-const barWidth = 45;
+const maxRss = Math.max(...results.map(r => r.rssMb), 1);
+const barWidth = 50;
 
-for (const [libs, data] of Object.entries(grouped)) {
-  const files = parseInt(libs) * FILES_PER_LIB;
-  console.log(`\n  ${libs} libs (${files.toLocaleString()} files):`);
-
-  for (const [config, mb] of Object.entries(data)) {
-    const len = Math.round((mb / maxMb) * barWidth);
-    const bar = '\u2588'.repeat(len) + '\u2591'.repeat(barWidth - len);
-    const label = config === 'native-only' ? 'native ' : 'jsplugin';
-    console.log(`    ${label} ${bar} ${mb.toFixed(1)} MB`);
-  }
+for (const r of results) {
+  const len = Math.max(0, Math.round((r.rssMb / maxRss) * barWidth));
+  const bar = '\u2588'.repeat(len) + '\u2591'.repeat(barWidth - len);
+  console.log(`  ${String(r.files.toLocaleString('en-US')).padStart(9)} ${bar} ${r.rssMb} MB`);
 }
 
-// --- Save JSON ---
+// --- Time chart ---
+console.log('\n' + '='.repeat(80));
+console.log('  Time Scaling');
+console.log('='.repeat(80));
+
+const maxTime = Math.max(...results.map(r => r.timeMs), 1);
+
+for (const r of results) {
+  const len = Math.max(0, Math.round((r.timeMs / maxTime) * barWidth));
+  const bar = '\u2588'.repeat(len) + '\u2591'.repeat(barWidth - len);
+  console.log(`  ${String(r.files.toLocaleString('en-US')).padStart(9)} ${bar} ${(r.timeMs / 1000).toFixed(1)}s`);
+}
+
+// --- Save ---
 const output = {
-  meta: {
-    oxlintVersion,
-    nodeVersion: process.version,
-    platform: `${process.platform} ${process.arch}`,
-    date: new Date().toISOString(),
-    filesPerLib: FILES_PER_LIB,
-    runsPerConfig: RUNS,
-  },
+  meta: { version, binary: CUSTOM_BIN || 'npx oxlint', platform: `${process.platform} ${process.arch}`, nodeVersion: process.version, date: new Date().toISOString(), filesPerLib: FILES_PER_LIB, settleMs: SETTLE_MS },
   results,
 };
-
 writeFileSync(OUTPUT, JSON.stringify(output, null, 2));
 console.log(`\nResults saved to ${OUTPUT}`);
+
+// Cleanup
+if (existsSync(LIBS_DIR)) rmSync(LIBS_DIR, { recursive: true });
