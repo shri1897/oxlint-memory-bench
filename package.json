@@ -9,6 +9,7 @@
     "clean": "rm -rf libs results"
   },
   "devDependencies": {
+    "eslint-plugin-playwright": "^2.10.1",
     "oxlint": "latest"
   }
 }
