@@ -5,17 +5,17 @@
     "react",
     "import"
   ],
+  "categories": {
+    "correctness": "off"
+  },
+  "rules": {
+    "no-unused-vars": "warn",
+    "custom/no-unused-imports": "warn"
+  },
   "jsPlugins": [
     {
       "name": "custom",
       "specifier": "./plugins/no-unused-imports.mjs"
     }
-  ],
-  "categories": {
-    "correctness": "off"
-  },
-  "rules": {
-    "custom/no-unused-imports": "warn",
-    "no-unused-vars": "warn"
-  }
+  ]
 }
