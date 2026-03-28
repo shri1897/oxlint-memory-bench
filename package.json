@@ -8,6 +8,7 @@
     "generate": "node scripts/generate-libs.mjs",
     "bench": "node scripts/bench.mjs",
     "bench:lsp": "node scripts/bench-lsp.mjs",
+    "bench:real": "node scripts/bench-real-repo.mjs",
     "bench:compare": "node scripts/compare-versions.mjs",
     "clean": "rm -rf libs results"
   },
