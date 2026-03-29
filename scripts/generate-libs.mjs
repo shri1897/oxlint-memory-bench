@@ -183,11 +183,22 @@ function generateFile(idx) {
   else if (r < 0.40) targetBlocks = 4;       // 20%: ~15 KB
   else if (r < 0.60) targetBlocks = 12;      // 20%: ~45 KB
   else if (r < 0.80) targetBlocks = 40;      // 20%: ~150 KB
-  else if (r < 0.90) targetBlocks = 120;     // 10%: ~450 KB
-  else if (r < 0.97) targetBlocks = 400;     //  7%: ~1.5 MB
-  else targetBlocks = 1000;                   //  3%: ~3.5 MB
+  else if (r < 0.85) targetBlocks = 120;     // 5%: ~450 KB
+  else if (r < 0.93) targetBlocks = 400;     //  8%: ~1.5 MB
+  else targetBlocks = 1200;                   //  7%: ~4.5 MB
 
-  let content = `import { useState, useEffect, useCallback, useMemo, useRef } from 'react';\nimport type { ReactNode, Dispatch, SetStateAction } from 'react';\n\n`;
+  // Cross-file imports that oxlint can resolve — triggers import/no-cycle multi-file analysis.
+  // Each file imports from several other generated files, creating a dense import graph.
+  let content = `import { useState, useEffect, useCallback, useMemo, useRef } from 'react';\nimport type { ReactNode, Dispatch, SetStateAction } from 'react';\n`;
+  const totalFiles = FILE_COUNT;
+  for (let dep = 1; dep <= 5; dep++) {
+    const depIdx = (idx + dep * 137) % totalFiles;
+    if (depIdx === idx) continue;
+    const depDir = `lib-${String(Math.floor(depIdx / 10)).padStart(5, '0')}`;
+    const depFile = `f${depIdx % 10}`;
+    content += `import { ${pascal(depIdx)}C0 } from '../../${depDir}/src/${depFile}';\n`;
+  }
+  content += '\n';
 
   for (let b = 0; b < targetBlocks; b++) {
     const blockType = b % 4;
