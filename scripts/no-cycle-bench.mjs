@@ -243,6 +243,7 @@ function timeRun(bin) {
   const err = r.stderr || '';
   let userSec = 0;
   let systemSec = 0;
+  let maxRssBytes = 0;
   const bsd = err.match(/([\d.]+)\s+real\s+([\d.]+)\s+user\s+([\d.]+)\s+sys/);
   if (bsd) {
     userSec = parseFloat(bsd[2]);
@@ -252,6 +253,14 @@ function timeRun(bin) {
     const s = err.match(/System time \(seconds\):\s+([\d.]+)/);
     if (u) userSec = parseFloat(u[1]);
     if (s) systemSec = parseFloat(s[1]);
+  }
+  // macOS BSD time -l prints bytes; GNU time -v prints kilobytes.
+  const bsdRss = err.match(/(\d+)\s+maximum resident set size/);
+  if (bsdRss) {
+    maxRssBytes = parseInt(bsdRss[1], 10);
+  } else {
+    const gnuRss = err.match(/Maximum resident set size \(kbytes\):\s+(\d+)/);
+    if (gnuRss) maxRssBytes = parseInt(gnuRss[1], 10) * 1024;
   }
 
   // Oxlint prints its summary to stdout. Fall back to stderr on older versions.
@@ -264,6 +273,7 @@ function timeRun(bin) {
     wallMs,
     userSec,
     systemSec,
+    maxRssBytes,
     warnings: summary ? +summary[1] : null,
     errors: summary ? +summary[2] : null,
     threads: threads ? +threads[1] : null,
@@ -303,9 +313,10 @@ for (const t of targets) {
     const r = timeRun(t.bin);
     rows.push(r);
     const cpuPct = r.wallMs > 0 ? ((r.userSec * 1000) / r.wallMs * 100).toFixed(0) : '?';
+    const rssMb = (r.maxRssBytes / (1024 * 1024)).toFixed(0);
     console.log(
       `   run ${i + 1}: wall=${(r.wallMs / 1000).toFixed(2)}s  user=${r.userSec.toFixed(2)}s  ` +
-        `sys=${r.systemSec.toFixed(2)}s  cpu=${cpuPct}%  files=${r.filesLinted}  ` +
+        `sys=${r.systemSec.toFixed(2)}s  cpu=${cpuPct}%  rss=${rssMb}MB  files=${r.filesLinted}  ` +
         `warn=${r.warnings}  err=${r.errors}  threads=${r.threads}`,
     );
   }
@@ -319,6 +330,8 @@ for (const t of targets) {
     wallMaxMs: max(rows.map((r) => r.wallMs)),
     userSec: mean(rows.map((r) => r.userSec)),
     systemSec: mean(rows.map((r) => r.systemSec)),
+    maxRssBytes: max(rows.map((r) => r.maxRssBytes)),
+    meanRssBytes: mean(rows.map((r) => r.maxRssBytes)),
     warnings: rows[0].warnings,
     errors: rows[0].errors,
     filesLinted: rows[0].filesLinted,
@@ -335,8 +348,10 @@ const header = [
   pad('wall mean (s)', 14),
   pad('wall range', 16),
   pad('user (s)', 10),
+  pad('rss max (MB)', 14),
   pad('wall×', 8),
   pad('user×', 8),
+  pad('rss×', 8),
   pad('warn', 8),
   'err',
 ].join('');
@@ -348,14 +363,21 @@ for (const r of results) {
   const wallX = (r.wallMs / base.wallMs).toFixed(2) + '×';
   const userX =
     r.userSec > 0 && base.userSec > 0 ? (r.userSec / base.userSec).toFixed(2) + '×' : '—';
+  const rssMb = (r.maxRssBytes / (1024 * 1024)).toFixed(0);
+  const rssX =
+    r.maxRssBytes > 0 && base.maxRssBytes > 0
+      ? (r.maxRssBytes / base.maxRssBytes).toFixed(2) + '×'
+      : '—';
   console.log(
     [
       pad(r.label, 28),
       pad(wallMean, 14),
       pad(wallRange, 16),
       pad(r.userSec.toFixed(2), 10),
+      pad(rssMb, 14),
       pad(wallX, 8),
       pad(userX, 8),
+      pad(rssX, 8),
       pad(String(r.warnings ?? '—'), 8),
       String(r.errors ?? '—'),
     ].join(''),
